@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Key Finder</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0a0a0a;
+  color: #e0e0e0;
+  font-family: 'SF Mono', 'Fira Mono', monospace;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #1e1e1e;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+#listen-btn {
+  background: none;
+  border: 1px solid #444;
+  color: #ccc;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.08em;
+}
+#listen-btn.on { border-color: #c03; color: #ff2244; }
+#key-readout { font-size: 22px; font-weight: 700; color: #fff; min-width: 110px; }
+#key-readout .mode { font-size: 13px; font-weight: 400; color: #666; margin-left: 6px; }
+#conf-wrap { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 80px; }
+#conf-label { font-size: 11px; color: #444; white-space: nowrap; }
+#conf-track { flex: 1; height: 2px; background: #1e1e1e; border-radius: 1px; }
+#conf-fill { height: 2px; background: #c03; border-radius: 1px; width: 0%; transition: width 0.4s; }
+#speed-wrap { display: flex; align-items: center; gap: 8px; }
+#speed-label { font-size: 11px; color: #444; }
+#speed-slider { width: 90px; }
+#main { display: flex; flex: 1; overflow: hidden; }
+#note-labels {
+  width: 38px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #1a1a1a;
+}
+.note-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 8px;
+  font-size: 11px;
+  color: #2e2e2e;
+  border-bottom: 1px solid #111;
+  transition: color 0.3s;
+}
+.note-label.black-key { background: #070707; }
+.note-label.in-key { color: #888; }
+.note-label.root { color: #ff2244; font-weight: 700; }
+#canvas-wrap { flex: 1; position: relative; }
+canvas { display: block; }
+#bottombar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 16px;
+  border-top: 1px solid #1a1a1a;
+  flex-shrink: 0;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.note-pill {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  border: 1px solid #1c1c1c;
+  color: #333;
+  letter-spacing: 0.04em;
+}
+.note-pill.in-key { border-color: #2e2e2e; color: #777; }
+.note-pill.root { border-color: #c03; color: #ff2244; }
+#alts { margin-left: auto; font-size: 11px; color: #383838; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <button id="listen-btn">&#9654; listen</button>
+  <div id="key-readout">&#8212;<span class="mode"></span></div>
+  <div id="conf-wrap">
+    <span id="conf-label">confidence</span>
+    <div id="conf-track"><div id="conf-fill"></div></div>
+  </div>
+  <div id="speed-wrap">
+    <span id="speed-label">scroll speed</span>
+    <input type="range" id="speed-slider" min="1" max="100" value="30">
+  </div>
+</div>
+
+<div id="main">
+  <div id="note-labels" id="labels"></div>
+  <div id="canvas-wrap"><canvas id="viz"></canvas></div>
+</div>
+
+<div id="bottombar">
+  <div id="alts"></div>
+</div>
+
+<script>
+const NOTES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const BLACK=new Set([1,3,6,8,10]);
+const KS_MAJOR=[6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88];
+const KS_MINOR=[6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+const SCALE_STEPS={major:[0,2,4,5,7,9,11],minor:[0,2,3,5,7,8,10]};
+const NOTE_ROWS=[...Array(12)].map((_,i)=>i).reverse();
+
+function fmt(n){return n.replace('#','\u266f');}
+
+function pearson(a,b){
+  const n=a.length,ma=a.reduce((s,x)=>s+x,0)/n,mb=b.reduce((s,x)=>s+x,0)/n;
+  let num=0,da=0,db=0;
+  for(let i=0;i<n;i++){const ai=a[i]-ma,bi=b[i]-mb;num+=ai*bi;da+=ai*ai;db+=bi*bi;}
+  return(da===0||db===0)?0:num/Math.sqrt(da*db);
+}
+
+function ksDetect(pcp){
+  let best={score:-2,key:0,mode:'major'};
+  const results=[];
+  for(let r=0;r<12;r++){
+    for(const[mode,tmpl]of[['major',KS_MAJOR],['minor',KS_MINOR]]){
+      const rot=Array.from({length:12},(_,i)=>pcp[(i+r)%12]);
+      const score=pearson(rot,tmpl);
+      results.push({key:r,mode,score});
+      if(score>best.score)best={score,key:r,mode};
+    }
+  }
+  results.sort((a,b)=>b.score-a.score);
+  return{...best,alts:results.slice(1,4)};
+}
+
+const labelsEl=document.getElementById('note-labels');
+NOTE_ROWS.forEach(pc=>{
+  const d=document.createElement('div');
+  d.className='note-label'+(BLACK.has(pc)?' black-key':'');
+  d.id='lbl-'+pc;
+  d.textContent=fmt(NOTES[pc]);
+  labelsEl.appendChild(d);
+});
+
+const canvas=document.getElementById('viz');
+const ctx=canvas.getContext('2d');
+let W=0,H=0;
+
+function resize(){
+  const wrap=document.getElementById('canvas-wrap');
+  W=wrap.clientWidth; H=wrap.clientHeight;
+  canvas.width=W; canvas.height=H;
+}
+window.addEventListener('resize',()=>{resize();});
+resize();
+
+const COL_W=3;
+let columns=[];
+let pcpSmooth=new Float32Array(12);
+let pcpHistory=new Float32Array(12);
+let lastKey=null;
+let audioCtx,analyser,animFrame,running=false,lastColTime=0;
+
+function getIntervalMs(){
+  const v=parseInt(document.getElementById('speed-slider').value);
+  return Math.max(16, 3000/(v*3+10));
+}
+
+function addCol(pcp){
+  const max=Math.max(...pcp,1e-12);
+  const col=new Float32Array(12);
+  for(let i=0;i<12;i++)col[i]=pcp[i]/max;
+  columns.push(col);
+  const keep=Math.ceil(W/COL_W)+20;
+  if(columns.length>keep)columns.splice(0,columns.length-keep);
+}
+
+function drawFrame(){
+  ctx.clearRect(0,0,W,H);
+  const rowH=H/12;
+  const nCols=columns.length;
+  const visible=Math.floor(W/COL_W)+1;
+  const startIdx=Math.max(0,nCols-visible);
+
+  const scaleSet=lastKey?new Set(SCALE_STEPS[lastKey.mode].map(s=>(lastKey.key+s)%12)):new Set();
+
+  for(let ci=startIdx;ci<nCols;ci++){
+    const col=columns[ci];
+    const x=W-(nCols-ci)*COL_W;
+    const age=(nCols-ci)/Math.max(visible,1);
+    for(let ri=0;ri<12;ri++){
+      const pc=NOTE_ROWS[ri];
+      const e=col[pc];
+      if(e<0.03)continue;
+      const y=ri*rowH;
+      const isRoot=lastKey&&pc===lastKey.key;
+      const inKey=scaleSet.has(pc);
+      let r,g,b;
+      if(isRoot){r=255;g=30;b=60;}
+      else if(inKey){r=60;g=140;b=255;}
+      else{r=70;g=70;b=70;}
+      const alpha=Math.min(1,e*(1-age*0.7));
+      ctx.fillStyle=`rgba(${r},${g},${b},${alpha.toFixed(3)})`;
+      ctx.fillRect(x,y+1,COL_W-1,rowH-2);
+    }
+  }
+
+  ctx.strokeStyle='#111';
+  ctx.lineWidth=0.5;
+  for(let ri=1;ri<12;ri++){
+    const y=Math.round(ri*rowH)+0.5;
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();
+  }
+
+  ctx.strokeStyle='#1a1a1a';
+  ctx.lineWidth=0.5;
+  for(let ci=startIdx;ci<nCols;ci+=10){
+    const x=Math.round(W-(nCols-ci)*COL_W)+0.5;
+    ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();
+  }
+}
+
+function updateLabels(){
+  if(!lastKey)return;
+  const scaleSet=new Set(SCALE_STEPS[lastKey.mode].map(s=>(lastKey.key+s)%12));
+  NOTE_ROWS.forEach(pc=>{
+    const el=document.getElementById('lbl-'+pc);
+    el.classList.remove('root','in-key');
+    if(pc===lastKey.key)el.classList.add('root');
+    else if(scaleSet.has(pc))el.classList.add('in-key');
+  });
+}
+
+function updatePills(){
+  if(!lastKey)return;
+  const scaleSet=new Set(SCALE_STEPS[lastKey.mode].map(s=>(lastKey.key+s)%12));
+  const bar=document.getElementById('bottombar');
+  bar.querySelectorAll('.note-pill').forEach(e=>e.remove());
+  const altsEl=document.getElementById('alts');
+  NOTES.forEach((n,pc)=>{
+    const p=document.createElement('div');
+    p.className='note-pill';
+    if(pc===lastKey.key)p.classList.add('root');
+    else if(scaleSet.has(pc))p.classList.add('in-key');
+    p.textContent=fmt(n);
+    bar.insertBefore(p,altsEl);
+  });
+  altsEl.textContent=lastKey.alts.map(a=>fmt(NOTES[a.key])+' '+a.mode).join('  /  ');
+}
+
+function analyze(now){
+  if(!running)return;
+  animFrame=requestAnimationFrame(analyze);
+
+  const buf=new Float32Array(analyser.frequencyBinCount);
+  analyser.getFloatFrequencyData(buf);
+  const SR=audioCtx.sampleRate;
+  const binHz=SR/analyser.fftSize;
+  const frame=new Float32Array(12);
+
+  for(let i=1;i<buf.length;i++){
+    const freq=i*binHz;
+    if(freq<55||freq>4400)continue;
+    const db=buf[i];
+    if(db<-70)continue;
+    const power=Math.pow(10,db/10);
+    const midi=Math.round(12*Math.log2(freq/440)+69);
+    const pc=((midi%12)+12)%12;
+    frame[pc]+=power;
+  }
+
+  const a=0.18;
+  for(let i=0;i<12;i++){
+    pcpSmooth[i]=pcpSmooth[i]*(1-a)+frame[i]*a;
+    pcpHistory[i]=pcpHistory[i]*0.97+frame[i]*0.03;
+  }
+
+  const interval=getIntervalMs();
+  if(now-lastColTime>interval){
+    addCol(pcpSmooth);
+    lastColTime=now;
+  }
+
+  const result=ksDetect(Array.from(pcpHistory));
+  const conf=Math.max(0,Math.min(1,(result.score+1)/2));
+  if(conf>0.3){
+    const changed=!lastKey||lastKey.key!==result.key||lastKey.mode!==result.mode;
+    lastKey=result;
+    document.getElementById('key-readout').innerHTML=
+      fmt(NOTES[result.key])+'<span class="mode"> '+result.mode+'</span>';
+    document.getElementById('conf-fill').style.width=Math.round(conf*100)+'%';
+    if(changed){updateLabels();updatePills();}
+  }
+
+  drawFrame();
+}
+
+document.getElementById('listen-btn').addEventListener('click',async()=>{
+  if(running){
+    running=false;
+    cancelAnimationFrame(animFrame);
+    if(audioCtx)audioCtx.close();
+    audioCtx=null;
+    document.getElementById('listen-btn').textContent='\u25b6 listen';
+    document.getElementById('listen-btn').classList.remove('on');
+    return;
+  }
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+    audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    analyser=audioCtx.createAnalyser();
+    analyser.fftSize=8192;
+    analyser.smoothingTimeConstant=0.55;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    pcpSmooth=new Float32Array(12);
+    pcpHistory=new Float32Array(12);
+    columns=[];lastKey=null;running=true;
+    lastColTime=performance.now();
+    document.getElementById('listen-btn').textContent='\u25a0 stop';
+    document.getElementById('listen-btn').classList.add('on');
+    requestAnimationFrame(analyze);
+  }catch(e){alert('Mic access needed: '+e.message);}
+});
+</script>
+</body>
+</html>
